@@ -75,9 +75,50 @@ Begin every task by building a complete picture of the situation.
       - [ ] Step 2: ...
 
       Please review this plan. To approve, trigger the pipeline with `YOLO_COMMAND=approve`. To make changes, comment changes needed.
-      ```
+3. **Analyze Intent**: Determine the user's goal (bug fix, feature, etc.). If the request is ambiguous, the ONLY allowed action is calling the tool to leave a comment to ask for clarification.
 
-3. **Post the Plan**: You MUST use the appropriate tool to post your plan as a note/comment on the Issue or Merge Request. The workflow should end only after this tool call has been successfully formulated.
+4. **Formulate & Post Plan**: Construct a detailed checklist. Include a **resource estimate**.
+
+    - **Plan Template:**
+
+        ```markdown
+        ## 🤖 AI Assistant: Plan of Action
+
+        I have analyzed the request and propose the following plan. **This plan will not be executed until it is approved by a maintainer.**
+
+        **Resource Estimate:**
+
+        *   **Estimated Tool Calls:** ~[Number]
+        *   **Files to Modify:** [Number]
+
+        **Proposed Steps:**
+
+        -   [ ] Step 1: Detailed description of the first action.
+        -   [ ] Step 2: ...
+
+        Please review this plan. To approve, trigger the pipeline with `YOLO_COMMAND=approve`. To make changes, comment changes needed.
+        ```
+
+5. **Post the Plan**: The GitLab MCP server does NOT have a tool to post comments directly to an Issue or Merge Request. You MUST use the `run_shell_command` tool to execute a `curl` command to post your plan.
+    Use this exact command structure to post the comment, replacing `$COMMENT_BODY` with your markdown plan (properly escaped using jq):
+
+    ```bash
+    if [ -n "$IS_PULL_REQUEST" ]; then
+      ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${ISSUE_NUMBER}/notes"
+    else
+      ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}/notes"
+    fi
+
+    if [ -n "$GITLAB_TOKEN" ]; then
+      AUTH_HEADER="PRIVATE-TOKEN: $GITLAB_TOKEN"
+    else
+      AUTH_HEADER="JOB-TOKEN: $CI_JOB_TOKEN"
+    fi
+
+    jq -n --arg body "$COMMENT_BODY" '{body: $body}' | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "$ENDPOINT"
+    ```
+
+    The workflow should end only after this tool call has been successfully formulated.
 
 -----
 

@@ -2,6 +2,13 @@ stages:
   - dispatch
   - yolo
 
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
 variables:
   # Base settings
   MCP_SERVER_VERSION: "0.6.2"
@@ -117,12 +124,25 @@ yolo-review:
       artifacts: true
   rules:
     - if: '$YOLO_COMMAND == "review"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   variables:
     ISSUE_TITLE: "${CI_MERGE_REQUEST_TITLE}"
     ISSUE_BODY: "${CI_MERGE_REQUEST_DESCRIPTION}"
     PULL_REQUEST_NUMBER: "${CI_MERGE_REQUEST_IID}"
     REPOSITORY: "${CI_PROJECT_PATH}"
   script:
+    - |
+      if [ -z "$PULL_REQUEST_NUMBER" ]; then
+        echo "PULL_REQUEST_NUMBER is empty, trying to find MR for branch $CI_COMMIT_REF_NAME..."
+        export PULL_REQUEST_NUMBER=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests?state=opened&source_branch=${CI_COMMIT_REF_NAME}" | jq '.[0].iid')
+        if [ "$PULL_REQUEST_NUMBER" == "null" ] || [ -z "$PULL_REQUEST_NUMBER" ]; then
+          echo "No open Merge Request found for this branch. Cannot proceed with review."
+          exit 0
+        fi
+        export ISSUE_TITLE=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${PULL_REQUEST_NUMBER}" | jq -r '.title')
+        export ISSUE_BODY=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${PULL_REQUEST_NUMBER}" | jq -r '.description')
+        echo "Found MR !${PULL_REQUEST_NUMBER}: ${ISSUE_TITLE}"
+      fi
     - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-review.md)"
 
 # ==========================================
@@ -235,4 +255,3 @@ yolo-scheduled-triage:
           fi
         done
       fi
-
