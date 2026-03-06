@@ -10,7 +10,6 @@ variables:
 default:
   tags:
     - self-hosted
-    - WIN
   before_script:
     - |
       mkdir -p ~/.gemini
