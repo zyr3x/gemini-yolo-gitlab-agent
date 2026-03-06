@@ -1,0 +1,210 @@
+stages:
+  - dispatch
+  - yolo
+
+variables:
+  # Base settings
+  GEMINI_CLI_HOME: "${CI_PROJECT_DIR}/.gemini"
+  MCP_SERVER_VERSION: "latest"
+
+default:
+  tags:
+    - self-hosted
+    - WIN
+  before_script:
+    - |
+      mkdir -p ~/.gemini
+      cat << EOF > ~/.gemini/settings.json
+      {
+        "security": {
+          "auth": {
+            "selectedType": "oauth-personal"
+          }
+        },
+        "model": {
+          "maxSessionTurns": 25
+        },
+        "telemetry": {
+          "enabled": true,
+          "target": "local",
+          "outfile": "gemini-telemetry.log"
+        },
+        "mcpServers": {
+          "gitlab": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-gitlab@${MCP_SERVER_VERSION}"],
+            "env": {
+              "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_TOKEN:-$CI_JOB_TOKEN}",
+              "GITLAB_API_URL": "${CI_API_V4_URL}"
+            }
+          }
+        },
+        "tools": {
+          "core": [
+            "read_file",
+            "run_shell_command(cat)",
+            "run_shell_command(echo)",
+            "run_shell_command(grep)",
+            "run_shell_command(head)",
+            "run_shell_command(tail)",
+            "run_shell_command(jq)",
+            "run_shell_command(printenv)"
+          ]
+        }
+      }
+      EOF
+
+# ==========================================
+# Dispatcher
+# Determines the command based on commit message, variables, or MR event
+# ==========================================
+dispatch:
+  stage: dispatch
+  script:
+    - echo "Determining YOLO command..."
+    # Fallback to variables if provided via manual trigger
+    - |
+      if [[ -n "$YOLO_COMMAND" ]]; then
+        echo "YOLO_COMMAND=${YOLO_COMMAND}" > yolo.env
+        exit 0
+      fi
+    # If it's a merge request, default to review
+    - |
+      if [[ "$CI_PIPELINE_SOURCE" == "merge_request_event" ]]; then
+        echo "YOLO_COMMAND=review" > yolo.env
+        exit 0
+      fi
+    # Default fallthrough
+    - echo "YOLO_COMMAND=fallthrough" > yolo.env
+  artifacts:
+    reports:
+      dotenv: yolo.env
+
+# ==========================================
+# YOLO Review (Merge Requests)
+# ==========================================
+yolo-review:
+  stage: yolo
+  needs:
+    - job: dispatch
+      artifacts: true
+  rules:
+    - if: '$YOLO_COMMAND == "review"'
+  variables:
+    ISSUE_TITLE: "${CI_MERGE_REQUEST_TITLE}"
+    ISSUE_BODY: "${CI_MERGE_REQUEST_DESCRIPTION}"
+    PULL_REQUEST_NUMBER: "${CI_MERGE_REQUEST_IID}"
+    REPOSITORY: "${CI_PROJECT_PATH}"
+  script:
+    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-review.md)"
+
+# ==========================================
+# YOLO Triage (Issues)
+# Note: Requires trigger via webhook or manual pipeline with YOLO_COMMAND=triage
+# ==========================================
+yolo-triage:
+  stage: yolo
+  needs:
+    - job: dispatch
+      artifacts: true
+  rules:
+    - if: '$YOLO_COMMAND == "triage"'
+  variables:
+    ISSUE_TITLE: "${CI_ISSUE_TITLE}"
+    ISSUE_BODY: "${CI_ISSUE_DESCRIPTION}"
+    ISSUE_NUMBER: "${CI_ISSUE_IID}"
+    REPOSITORY: "${CI_PROJECT_PATH}"
+  script:
+    # Get available labels (You may need to adapt this fetch logic for GitLab API)
+    - echo "Fetching labels..."
+    - >
+      curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}"
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/labels"
+      | jq -r '.[].name' | paste -sd "," - > labels.txt
+    - export AVAILABLE_LABELS=$(cat labels.txt)
+    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-triage.md)"
+    # Apply labels via API based on SELECTED_LABELS var updated by Gemini
+    - source "$CI_PROJECT_DIR/.gemini_env" || true
+    - |
+      if [[ -n "$SELECTED_LABELS" ]]; then
+        curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+             --data "labels=${SELECTED_LABELS}" \
+             "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}"
+      fi
+
+# ==========================================
+# YOLO Invoke (Custom Commands)
+# ==========================================
+yolo-invoke:
+  stage: yolo
+  needs:
+    - job: dispatch
+      artifacts: true
+  rules:
+    - if: '$YOLO_COMMAND == "invoke"'
+  variables:
+    TITLE: "${CI_MERGE_REQUEST_TITLE:-$CI_ISSUE_TITLE}"
+    DESCRIPTION: "${CI_MERGE_REQUEST_DESCRIPTION:-$CI_ISSUE_DESCRIPTION}"
+    EVENT_NAME: "${CI_PIPELINE_SOURCE}"
+    IS_PULL_REQUEST: "$CI_MERGE_REQUEST_IID"
+    ISSUE_NUMBER: "${CI_MERGE_REQUEST_IID:-$CI_ISSUE_IID}"
+    REPOSITORY: "${CI_PROJECT_PATH}"
+  script:
+    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-invoke.md)"
+
+# ==========================================
+# YOLO Plan Execute (Approve)
+# ==========================================
+yolo-plan-execute:
+  stage: yolo
+  needs:
+    - job: dispatch
+      artifacts: true
+  rules:
+    - if: '$YOLO_COMMAND == "approve"'
+  variables:
+    TITLE: "${CI_MERGE_REQUEST_TITLE:-$CI_ISSUE_TITLE}"
+    DESCRIPTION: "${CI_MERGE_REQUEST_DESCRIPTION:-$CI_ISSUE_DESCRIPTION}"
+    EVENT_NAME: "${CI_PIPELINE_SOURCE}"
+    IS_PULL_REQUEST: "$CI_MERGE_REQUEST_IID"
+    ISSUE_NUMBER: "${CI_MERGE_REQUEST_IID:-$CI_ISSUE_IID}"
+    REPOSITORY: "${CI_PROJECT_PATH}"
+  script:
+    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-plan-execute.md)"
+
+# ==========================================
+# YOLO Scheduled Triage
+# ==========================================
+yolo-scheduled-triage:
+  stage: yolo
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - echo "Fetching labels..."
+    - >
+      curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}"
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/labels"
+      | jq -r '.[].name' | paste -sd "," - > labels.txt
+    - export AVAILABLE_LABELS=$(cat labels.txt)
+    - echo "Fetching untriaged issues..."
+    - >
+      curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}"
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues?state=opened"
+      | jq '[.[] | select(.labels | length == 0)]' > issues_to_triage.json
+    - export ISSUES_TO_TRIAGE=$(cat issues_to_triage.json)
+    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-scheduled-triage.md)"
+    # A script to parse the TRIAGED_ISSUES json and apply labels via cURL would go here.
+    - |
+      if [ -f "$CI_PROJECT_DIR/.gemini_env" ]; then
+        source "$CI_PROJECT_DIR/.gemini_env"
+        # Dummy loop over TRIAGED_ISSUES 
+        echo "$TRIAGED_ISSUES" | jq -c '.[]' | while read i; do
+          IID=$(echo $i | jq -r '.issue_number')
+          LABELS=$(echo $i | jq -r '.labels_to_set | join(",")')
+          if [ -n "$LABELS" ] && [ "$LABELS" != "null" ]; then
+            curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+                 --data "add_labels=${LABELS}" \
+                 "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${IID}"
+          fi
+        done
+      fi
