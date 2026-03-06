@@ -19,21 +19,31 @@ This project provides a set of GitLab CI/CD workflows and AI prompts that allow 
 
 Automates comprehensive code reviews for Merge Requests. The AI analyzes the code diff, understands the context by reading relevant files, and provides constructive feedback or actionable suggestions directly as MR comments.
 
+**Trigger:** Automatic on all Merge Request events.
+
 ### 🏷️ YOLO Triage
 
-Automatically triages and labels new or untriaged issues. The AI reads the issue title and description, compares them against available project labels, and applies the most relevant ones to keep your backlog organized.
+Triages and labels a single issue. The AI reads the issue title and description, compares them against available project labels, and applies the most relevant ones to keep your backlog organized.
+
+**Trigger:** Manual pipeline run with the variable `YOLO_COMMAND=triage`. This job requires issue details (like `CI_ISSUE_IID`) to be passed, which is typical when run from an issue webhook or a manual trigger with specified variables.
 
 ### ⚡ YOLO Invoke
 
-A flexible command processor for on-demand AI actions. Trigger custom AI tasks by mentioning the bot or using specific keywords in comments (e.g., in an issue or MR description), enabling tasks like refactoring, documentation generation, or in-depth bug analysis.
+A flexible command processor for on-demand AI actions. Enables tasks like refactoring, documentation generation, or in-depth bug analysis based on a high-level prompt.
+
+**Trigger:** Manual pipeline run with the variable `YOLO_COMMAND=invoke`.
 
 ### ✍️ YOLO Plan & Execute
 
-Enables multi-step, complex operations that require human approval. The AI generates a detailed plan of action, awaits approval, and then executes the plan autonomously, providing transparent progress and results.
+Enables multi-step, complex operations that require human approval. The AI generates a detailed plan of action, posts it for review, and once approved, executes the plan autonomously.
+
+**Trigger:** The execution part is triggered by a manual pipeline run with the variable `YOLO_COMMAND=approve`.
 
 ### ⏰ Scheduled Triage
 
 A periodic job that scans for all open, untriaged issues and proactively applies appropriate labels, ensuring continuous backlog organization without manual intervention.
+
+**Trigger:** Automatic via a scheduled pipeline.
 
 ## 📋 Project Structure
 
