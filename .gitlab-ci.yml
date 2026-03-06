@@ -4,15 +4,38 @@ stages:
 
 variables:
   # Base settings
-  GEMINI_CLI_HOME: "${CI_PROJECT_DIR}/.gemini"
-  MCP_SERVER_VERSION: "latest"
+  MCP_SERVER_VERSION: "0.6.2"
 
 default:
   tags:
     - self-hosted
   before_script:
     - |
+      source ~/.bashrc || true
+      source ~/.nvm/nvm.sh || true
       mkdir -p ~/.gemini
+      
+      # The @modelcontextprotocol/server-gitlab server is buggy and outputs invalid schemas.
+      # We wrap it in a Node script that injects "type": "object" into tools/list JSON responses.
+      cat << 'EOF' > ~/.gemini/gitlab-mcp-wrapper.js
+      const { spawn } = require("child_process");
+      const child = spawn("npx", ["-y", "@modelcontextprotocol/server-gitlab@" + process.env.MCP_SERVER_VERSION], { stdio: ["pipe", "pipe", "inherit"] });
+      
+      process.stdin.pipe(child.stdin);
+      
+      child.stdout.on("data", data => {
+        let text = data.toString();
+        // Patch the tools/list result to include "type": "object" which Zod strictly requires in newer MCP SDKs
+        if (text.includes('"tools":[')) {
+          text = text.replace(/"inputSchema":\{("\$schema":[^}]+)\}/g, '"inputSchema":{$1, "type": "object", "properties": {}}');
+          text = text.replace(/"inputSchema":\{\}/g, '"inputSchema":{"type":"object", "properties": {}}');
+        }
+        process.stdout.write(text);
+      });
+      child.on("exit", code => process.exit(code || 0));
+      EOF
+      chmod +x ~/.gemini/gitlab-mcp-wrapper.js
+
       cat << EOF > ~/.gemini/settings.json
       {
         "security": {
@@ -30,9 +53,10 @@ default:
         },
         "mcpServers": {
           "gitlab": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-gitlab@${MCP_SERVER_VERSION}"],
+            "command": "node",
+            "args": ["/root/.gemini/gitlab-mcp-wrapper.js"],
             "env": {
+              "MCP_SERVER_VERSION": "${MCP_SERVER_VERSION}",
               "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_TOKEN:-$CI_JOB_TOKEN}",
               "GITLAB_API_URL": "${CI_API_V4_URL}"
             }
@@ -59,6 +83,10 @@ default:
 # ==========================================
 dispatch:
   stage: dispatch
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "pipeline"'
   script:
     - echo "Determining YOLO command..."
     # Fallback to variables if provided via manual trigger
@@ -207,3 +235,4 @@ yolo-scheduled-triage:
           fi
         done
       fi
+
