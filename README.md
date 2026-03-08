@@ -8,81 +8,199 @@ This project provides a set of GitLab CI/CD workflows and AI prompts that allow 
 
 ## 🛠 How It Works
 
-1.  **Gemini CLI**: The core engine driving the AI interactions is the `gemini` command-line tool.
-2.  **YOLO Mode**: Enabled via the `--yolo` flag, this powerful mode allows the AI to "think" through a problem, formulate a plan, and then execute available tools (shell commands, API calls via MCP) until the task is complete.
-3.  **GitLab CI Integration**: Workflows are triggered by standard GitLab events (Merge Requests, Issues, Pipeline Schedules) ensuring seamless integration into your development process.
-4.  **MCP (Model Context Protocol)**: Utilizes the GitLab MCP server to provide the AI with structured, secure access to GitLab's API, enabling it to perform repository operations.
+1. **Gemini CLI**: The core engine driving the AI interactions is the `gemini` command-line tool.
+2. **YOLO Mode**: Enabled via the `--yolo` flag, this powerful mode allows the AI to "think" through a problem, formulate a plan, and then execute available tools (shell commands, API calls via MCP) until the task is complete.
+3. **GitLab CI Integration**: Workflows are triggered by standard GitLab events (Merge Requests, Issues, Pipeline Schedules) ensuring seamless integration into your development process.
+4. **MCP (Model Context Protocol)**: Utilizes the GitLab MCP server to provide the AI with structured, secure access to GitLab's API, enabling it to perform repository operations.
+
+## 🏗 Pipeline Architecture
+
+The pipeline is organized into **3 stages** that execute sequentially:
+
+```
+┌─────────────┐     ┌─────────────────────────┐     ┌──────────────┐
+│  dispatch    │ ──▶ │         yolo            │ ──▶ │    notify     │
+│             │     │                         │     │              │
+│ • Determine │     │ • yolo-review     (10m) │     │ • yolo-      │
+│   command   │     │ • yolo-triage     (10m) │     │   fallback   │
+│ • Post ack  │     │ • yolo-invoke     (10m) │     │   (on_failure │
+│   comment   │     │ • yolo-plan-exec  (30m) │     │    only)     │
+│             │     │ • yolo-sched-triage(15m)│     │              │
+└─────────────┘     └─────────────────────────┘     └──────────────┘
+```
+
+### Stage 1: `dispatch`
+
+Determines which YOLO command to execute based on the pipeline source:
+
+| Source | Action |
+| :--- | :--- |
+| Merge Request event | Sets `YOLO_COMMAND=review`, posts an acknowledgment comment 🤖 |
+| Manual trigger with `YOLO_COMMAND` variable | Uses the provided command (`triage`, `invoke`, `approve`) |
+| Pipeline schedule | Skips dispatch, runs `yolo-scheduled-triage` directly |
+| Otherwise | Sets `YOLO_COMMAND=fallthrough` (no action) |
+
+### Stage 2: `yolo`
+
+Runs exactly **one** YOLO job based on `YOLO_COMMAND`. Each job has:
+
+- **Timeout**: Prevents infinite hangs (10–30 minutes depending on the job).
+- **Concurrency control**: `resource_group` ensures only one YOLO job runs per MR at a time. A second pipeline for the same MR will queue instead of conflicting.
+- **Prompt templating**: Variables like `$REPOSITORY`, `$PULL_REQUEST_NUMBER` are injected into the prompt via `envsubst` before passing to Gemini.
+- **Label validation** (triage jobs): Labels selected by the AI are validated against the project's actual label list to prevent prompt injection.
+
+### Stage 3: `notify`
+
+The `yolo-fallback` job runs **only when a YOLO job fails** (`when: on_failure`). It posts an error message to the MR/Issue with a link to the pipeline logs so the user knows something went wrong.
 
 ## ✨ Key Features
 
 ### 🔍 YOLO Review
 
-Automates comprehensive code reviews for Merge Requests. The AI analyzes the code diff, understands the context by reading relevant files, and provides constructive feedback or actionable suggestions directly as MR comments.
+Automates comprehensive code reviews for Merge Requests. The AI analyzes the code diff, understands the context by reading relevant files, and provides constructive feedback with severity indicators (🔴 Critical, 🟠 High, 🟡 Medium, 🟢 Low) directly as MR comments.
 
-**Trigger:** Automatic on all Merge Request events.
+**Trigger:** Automatic on all Merge Request events (open, synchronize).
 
 ### 🏷️ YOLO Triage
 
-Triages and labels a single issue. The AI reads the issue title and description, compares them against available project labels, and applies the most relevant ones to keep your backlog organized.
+Triages and labels a single issue. The AI reads the issue title and description, compares them against available project labels, and applies the most relevant ones.
 
-**Trigger:** Manual pipeline run with the variable `YOLO_COMMAND=triage`. This job requires issue details (like `CI_ISSUE_IID`) to be passed, which is typical when run from an issue webhook or a manual trigger with specified variables.
+**Trigger:** Manual pipeline run with `YOLO_COMMAND=triage`.
 
 ### ⚡ YOLO Invoke
 
-A flexible command processor for on-demand AI actions. Enables tasks like refactoring, documentation generation, or in-depth bug analysis based on a high-level prompt.
+A flexible command processor for on-demand AI actions. Enables tasks like refactoring, documentation generation, or in-depth bug analysis. The AI creates a "Plan of Action" comment and waits for approval.
 
-**Trigger:** Manual pipeline run with the variable `YOLO_COMMAND=invoke`.
+**Trigger:** Manual pipeline run with `YOLO_COMMAND=invoke`.
 
 ### ✍️ YOLO Plan & Execute
 
-Enables multi-step, complex operations that require human approval. The AI generates a detailed plan of action, posts it for review, and once approved, executes the plan autonomously.
+Executes a previously approved plan of action. The AI looks for a comment titled "AI Assistant: Plan of Action" in the issue/MR, then executes each step sequentially using GitLab tools.
 
-**Trigger:** The execution part is triggered by a manual pipeline run with the variable `YOLO_COMMAND=approve`.
+**Trigger:** Manual pipeline run with `YOLO_COMMAND=approve`.
 
 ### ⏰ Scheduled Triage
 
-A periodic job that scans for all open, untriaged issues and proactively applies appropriate labels, ensuring continuous backlog organization without manual intervention.
+A periodic job that scans for all open, unlabeled issues and proactively applies appropriate labels. Results are validated against the project's label list before being applied.
 
 **Trigger:** Automatic via a scheduled pipeline.
 
+## 📖 Usage
+
+### Automatic Review (no action needed)
+
+Simply open or update a Merge Request — the pipeline triggers automatically, and the AI posts a review comment. All required variables (`CI_MERGE_REQUEST_TITLE`, `CI_MERGE_REQUEST_IID`, etc.) are provided by GitLab automatically for MR pipelines.
+
+### Manual Triggers via GitLab UI
+
+Go to **Build → Pipelines → Run pipeline**, select the branch, and add the required variables:
+
+> **Note:** Variables prefixed with `CI_MERGE_REQUEST_*` are auto-filled by GitLab for MR pipelines. Variables prefixed with `CI_ISSUE_*` do **not** exist in GitLab CI by default and **must** be passed manually.
+
+#### Triage an issue
+
+| Variable | Required | Description |
+| :--- | :---: | :--- |
+| `YOLO_COMMAND` | ✅ | Set to `triage` |
+| `CI_ISSUE_IID` | ✅ | Issue number (e.g. `42`) |
+| `CI_ISSUE_TITLE` | ✅ | Issue title text |
+| `CI_ISSUE_DESCRIPTION` | ✅ | Issue description / body text |
+
+#### Invoke a custom command (on a MR)
+
+| Variable | Required | Description |
+| :--- | :---: | :--- |
+| `YOLO_COMMAND` | ✅ | Set to `invoke` |
+| `CI_MERGE_REQUEST_IID` | ✅ | Merge Request number |
+| `CI_MERGE_REQUEST_TITLE` | ❌ | Auto-filled for MR pipelines |
+| `CI_MERGE_REQUEST_DESCRIPTION` | ❌ | Auto-filled for MR pipelines |
+
+#### Invoke a custom command (on an issue)
+
+| Variable | Required | Description |
+| :--- | :---: | :--- |
+| `YOLO_COMMAND` | ✅ | Set to `invoke` |
+| `CI_ISSUE_IID` | ✅ | Issue number |
+| `CI_ISSUE_TITLE` | ✅ | Issue title text |
+| `CI_ISSUE_DESCRIPTION` | ✅ | Issue description / body text |
+
+#### Approve and execute a plan
+
+| Variable | Required | Description |
+| :--- | :---: | :--- |
+| `YOLO_COMMAND` | ✅ | Set to `approve` |
+| `CI_MERGE_REQUEST_IID` | ✅ | MR number (or `CI_ISSUE_IID` for issues) |
+| `CI_MERGE_REQUEST_TITLE` | ❌ | Auto-filled for MR pipelines |
+| `CI_MERGE_REQUEST_DESCRIPTION` | ❌ | Auto-filled for MR pipelines |
+
+### Manual Triggers via API
+
+```bash
+# Example: Triage issue #42
+curl --request POST \
+  --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  --form "ref=main" \
+  --form "variables[YOLO_COMMAND]=triage" \
+  --form "variables[CI_ISSUE_IID]=42" \
+  --form "variables[CI_ISSUE_TITLE]=Bug in login page" \
+  --form "variables[CI_ISSUE_DESCRIPTION]=Login fails with 500 error" \
+  "https://gitlab.example.com/api/v4/projects/PROJECT_ID/pipeline"
+```
+
+### Setting up Scheduled Triage
+
+Go to **Build → Pipeline schedules → New schedule**, set a cron (e.g. `0 */6 * * *` for every 6 hours), and the pipeline will automatically triage unlabeled issues.
+
 ## 📋 Project Structure
 
--   `.gitlab-ci.yml`: Defines the CI/CD pipeline, orchestrating the execution of various AI tasks.
--   `.gitlab/commands/`: Contains markdown-based prompt templates that define the AI's persona, instructions, and workflow for different tasks:
-    -   `yolo-review.md`: Prompts and instructions for automated code reviews.
-    -   `yolo-triage.md`: Prompts and instructions for single-issue labeling.
-    -   `yolo-invoke.md`: Prompts for general-purpose custom command execution.
-    -   `yolo-plan-execute.md`: Prompts for verifying and executing approved multi-step plans.
-    -   `yolo-scheduled-triage.md`: Prompts and instructions for bulk scheduled issue triage.
+```
+.gitlab-ci.yml                          # Pipeline definition (3 stages)
+.gitlab/commands/
+  ├── yolo-review.md                    # Code review prompt
+  ├── yolo-triage.md                    # Issue labeling prompt
+  ├── yolo-invoke.md                    # Custom command prompt
+  ├── yolo-plan-execute.md              # Plan execution prompt
+  └── yolo-scheduled-triage.md          # Bulk triage prompt
+.gemini/
+  └── settings.json                     # (Generated at runtime) Gemini CLI config
+```
 
 ## ⚙️ Setup
 
 ### Prerequisites
 
-To run this agent, your GitLab CI/CD runners must have:
+Your GitLab CI/CD runner must have:
 
--   **Node.js (LTS recommended) and npm/npx**: Required for the MCP server wrapper.
--   **`jq`**: A lightweight and flexible command-line JSON processor.
--   **`curl`**: For interacting with the GitLab API.
--   **`gemini` CLI**: The Google Gemini command-line tool. Instructions for installation can be found [here](https://gemini.google.com/cli).
--   A GitLab Runner (configured with the `self-hosted` tag as per the current `.gitlab-ci.yml`, or updated to match your environment).
+- **Node.js** (LTS recommended) and **npm/npx** – for the MCP server wrapper
+- **`jq`** – command-line JSON processor
+- **`curl`** – for GitLab API interactions
+- **`envsubst`** – for prompt variable substitution (part of `gettext` package)
+- **`gemini` CLI** – the Google Gemini command-line tool ([Gemini CLI Documentation](https://geminicli.com/))
+- A GitLab Runner tagged `self-hosted` (or update the tag in `.gitlab-ci.yml`)
 
 ### Environment Variables
 
-The following variables **must** be configured in your GitLab Project or Group (CI/CD Settings > CI/CD > Variables):
+Configure these in **Settings → CI/CD → Variables**:
 
-| Variable | Description | Recommended Scope |
-| :--- | :--- | :--- |
-| `GITLAB_TOKEN` | A Personal Access Token (PAT) with `api` scope for the bot to perform actions (e.g., commenting, creating MRs, applying labels). | Protected branches, optionally all branches |
-| `GEMINI_CLI_HOME` | (Optional) Path to the Gemini CLI configuration directory. Defaults to `${CI_PROJECT_DIR}/.gemini` in the CI pipeline. | All branches |
-| `MCP_SERVER_VERSION` | (Optional) Specifies the version of `@modelcontextprotocol/server-gitlab` to use. Defaults to `0.6.2`. | All branches |
+| Variable | Required | Description |
+| :--- | :---: | :--- |
+| `GITLAB_TOKEN` | ✅ | Personal Access Token with `api` scope for commenting, creating MRs, applying labels |
+| `GEMINI_API_KEY` | ❌ | API key for Gemini. Not needed if the runner already has `gemini` CLI authenticated (e.g. via `gemini auth login`) |
+| `MCP_SERVER_VERSION` | ❌ | Version of `@modelcontextprotocol/server-gitlab` (default: `0.6.2`) |
 
 ### Installation
 
-1.  **Copy Files**: Copy the entire `.gitlab/` directory and the `.gitlab-ci.yml` file into the root of your GitLab repository.
-2.  **Configure Environment Variables**: Set up the required environment variables (`GITLAB_TOKEN`, `GEMINI_CLI_HOME`, `MCP_SERVER_VERSION`) in your GitLab project's CI/CD settings.
-3.  **Runner Configuration**: Ensure your GitLab runner has the necessary prerequisites installed (Node.js, npm, jq, curl, gemini CLI) and is tagged appropriately (e.g., `self-hosted` as used in the default `.gitlab-ci.yml`).
-4.  **Test**: Trigger a pipeline to ensure everything is set up correctly.
+1. **Copy Files**: Copy `.gitlab/` directory and `.gitlab-ci.yml` into your repository root.
+2. **Configure Variables**: Set `GITLAB_TOKEN` and `GEMINI_API_KEY` in CI/CD settings.
+3. **Runner Setup**: Ensure your runner has all prerequisites installed.
+4. **Test**: Create a test MR — the pipeline should trigger automatically and post a review.
+
+## 🔒 Security
+
+- **Label validation**: All labels selected by the AI are cross-checked against the project's actual label list, preventing prompt injection attacks.
+- **Prompt isolation**: All external data (issue titles, MR descriptions) is treated as untrusted context, not executable instructions.
+- **Tool restrictions**: The Gemini CLI is configured with a minimal set of allowed shell commands (`cat`, `echo`, `grep`, `head`, `tail`, `jq`, `printenv`).
+- **Token fallback**: The MCP server uses `$GITLAB_TOKEN` when available, falling back to the CI job token (`$CI_JOB_TOKEN`) for basic operations.
 
 ## 🤝 Contributing
 
