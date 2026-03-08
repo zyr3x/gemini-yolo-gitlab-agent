@@ -103,26 +103,25 @@ dispatch:
         echo "YOLO_COMMAND=${YOLO_COMMAND}" > yolo.env
         exit 0
       fi
-    # If it's a merge request, default to review
+    # If it's a merge request, default to review + post acknowledgment
     - |
       if [[ "$CI_PIPELINE_SOURCE" == "merge_request_event" ]]; then
         echo "YOLO_COMMAND=review" > yolo.env
+        # Post acknowledgment comment
+        if [[ -n "$CI_MERGE_REQUEST_IID" ]]; then
+          AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
+          COMMENT_BODY="🤖 Hi, I've received your request and I'm working on it now! You can track my progress in the [pipeline logs]($CI_PIPELINE_URL) for more details."
+          jq -n --arg body "$COMMENT_BODY" '{body: $body}' | \
+            curl --silent --show-error --request POST \
+              --header "$AUTH_HEADER" \
+              --header "Content-Type: application/json" \
+              --data @- \
+              "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || true
+        fi
         exit 0
       fi
     # Default fallthrough
     - echo "YOLO_COMMAND=fallthrough" > yolo.env
-    # Post acknowledgment comment for MR events
-    - |
-      if [[ "$CI_PIPELINE_SOURCE" == "merge_request_event" ]] && [[ -n "$CI_MERGE_REQUEST_IID" ]]; then
-        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
-        COMMENT_BODY="🤖 Hi, I've received your request and I'm working on it now! You can track my progress in the [pipeline logs]($CI_PIPELINE_URL) for more details."
-        jq -n --arg body "$COMMENT_BODY" '{body: $body}' | \
-          curl --silent --show-error --request POST \
-            --header "$AUTH_HEADER" \
-            --header "Content-Type: application/json" \
-            --data @- \
-            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || true
-      fi
   artifacts:
     reports:
       dotenv: yolo.env
@@ -240,30 +239,6 @@ yolo-invoke:
       EXIT_CODE=$?
       set -e
 
-      cat gemini_output.log
-
-      # Check if Gemini successfully posted a comment via MCP.
-      if grep -qE "(gitlab__add_note|add_note|create_merge_request_note|create_issue_note)" gemini_output.log; then
-        echo "Model successfully used the comment tool."
-      elif grep -q "## 🤖 AI Assistant: Plan of Action" gemini_output.log; then
-        echo "Model failed to use MCP tool. Falling back to stdout extraction..."
-        awk '/## 🤖 AI Assistant: Plan of Action/{flag=1} flag' gemini_output.log > final_plan.md
-        PLAN_BODY=$(cat final_plan.md)
-
-        if [ -n "$IS_PULL_REQUEST" ]; then
-          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${ISSUE_NUMBER}/notes"
-        else
-          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}/notes"
-        fi
-
-        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
-        jq -n --arg body "$PLAN_BODY" '{body: $body}' | \
-          curl --silent --show-error --fail --request POST \
-            --header "$AUTH_HEADER" \
-            --header "Content-Type: application/json" \
-            --data @- "$ENDPOINT"
-      fi
-
       exit $EXIT_CODE
 
 # ==========================================
@@ -292,30 +267,6 @@ yolo-plan-execute:
       gemini --yolo --prompt "$(cat yolo_prompt.md)" > gemini_output.log 2>&1
       EXIT_CODE=$?
       set -e
-
-      cat gemini_output.log
-
-      # Check if Gemini successfully posted a comment via MCP.
-      if grep -qE "(gitlab__add_note|add_note|create_merge_request_note|create_issue_note)" gemini_output.log; then
-        echo "Model successfully used the comment tool."
-      elif grep -q "## ✅ Task Complete" gemini_output.log; then
-        echo "Model failed to use MCP tool. Falling back to stdout extraction..."
-        awk '/## ✅ Task Complete/{flag=1} flag' gemini_output.log > final_report.md
-        REPORT_BODY=$(cat final_report.md)
-
-        if [ -n "$IS_PULL_REQUEST" ]; then
-          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${ISSUE_NUMBER}/notes"
-        else
-          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}/notes"
-        fi
-
-        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
-        jq -n --arg body "$REPORT_BODY" '{body: $body}' | \
-          curl --silent --show-error --fail --request POST \
-            --header "$AUTH_HEADER" \
-            --header "Content-Type: application/json" \
-            --data @- "$ENDPOINT"
-      fi
 
       exit $EXIT_CODE
 
