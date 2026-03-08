@@ -52,7 +52,7 @@ default:
           }
         },
         "model": {
-          "maxSessionTurns": 25
+          "maxSessionTurns": 100
         },
         "telemetry": {
           "enabled": true,
@@ -240,6 +240,10 @@ yolo-invoke:
       set -e
 
       cat gemini_output.log
+      if grep -q "Reached max session turns" gemini_output.log; then
+        echo "ERROR: Gemini reached max session turns without completing the task."
+        exit 1
+      fi
       exit $EXIT_CODE
 
 # ==========================================
@@ -270,6 +274,10 @@ yolo-plan-execute:
       set -e
 
       cat gemini_output.log
+      if grep -q "Reached max session turns" gemini_output.log; then
+        echo "ERROR: Gemini reached max session turns without completing the task."
+        exit 1
+      fi
       exit $EXIT_CODE
 
 # ==========================================
