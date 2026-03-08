@@ -25,6 +25,8 @@ default:
 
       git config --global user.email "yolo-bot@belvg.com"
       git config --global user.name "YOLO Gemini Bot"
+      # Configure git remote with token for pushing
+      git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
 
       # The @modelcontextprotocol/server-gitlab server is buggy and outputs invalid schemas.
       # We wrap it in a Node script that injects "type": "object" into tools/list JSON responses.
@@ -84,7 +86,8 @@ default:
             "run_shell_command(tail)",
             "run_shell_command(jq)",
             "run_shell_command(printenv)",
-            "run_shell_command(rm)"
+            "run_shell_command(rm)",
+            "run_shell_command(git)"
           ]
         }
       }

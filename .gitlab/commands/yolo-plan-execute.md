@@ -66,7 +66,12 @@ Before taking any action, you must locate the latest plan of action in the issue
 
 2. **Handle Errors**: If a tool fails, analyze the error. If you can correct it (e.g., a typo in a filename), retry once. If it fails again, halt and post a comment explaining the error.
 
-3. **Follow Code Change Protocol**: Use branching tools and commit tools as required, following Conventional Commit standards for all commit messages.
+3. **Follow Code Change Protocol**: Use branching tools to create a branch. However, DO NOT use the `push_files` tool or similar commit tools from the GitLab MCP server, as they are broken and will crash the agent.
+    Instead, you MUST use the `run_shell_command` tool with standard `git` commands to stage, commit, and push your changes.
+    - Create branch: (Use the MCP `create_branch` tool to create it via API FIRST, then use `git fetch && git checkout <branch>` to switch locally).
+    - Commit: `git add . && git commit -m "fix/feat: your commit message"`
+    - Push: `git push -u origin <branch>`
+    Follow Conventional Commit standards for all commit messages.
 
 4. **Compose & Post Report**: After successfully completing all steps, post a final summary. The GitLab MCP server does NOT have a comment tool. You MUST use the `run_shell_command` tool to execute a `curl` command to post your report.
     You MUST write your markdown report to a temporary file first using the `write_file` tool (e.g., to `temp_report.md`), and then use this exact command structure to post the report via `jq`:
