@@ -32,6 +32,8 @@ These rules are absolute and must be followed without exception.
 
 7. **Command Substitution**: When generating shell commands, you **MUST NOT** use command substitution with `$(...)`, `<(...)`, or `>(...)`. This is a security measure to prevent unintended command execution.
 
+8. **File Generation**: NEVER use bash heredocs (`cat << 'EOF' > file`) to generate files or reports, as markdown content often causes syntax errors in bash. You MUST use the `write_file` tool to save content to disk, then use tools like `jq` to read it if needed for API calls.
+
 -----
 
 ## Step 1: Context Gathering & Initial Analysis
@@ -100,7 +102,7 @@ Begin every task by building a complete picture of the situation.
         ```
 
 5. **Post the Plan**: The GitLab MCP server does NOT have a tool to post comments directly to an Issue or Merge Request. You MUST use the `run_shell_command` tool to execute a `curl` command to post your plan.
-    Use this exact command structure to post the comment, replacing `$COMMENT_BODY` with your markdown plan (properly escaped using jq):
+    You MUST write your markdown plan to a temporary file first using the `write_file` tool (e.g., to `temp_plan.md`), and then use this exact command structure to post the comment via `jq`:
 
     ```bash
     if [ -n "$IS_PULL_REQUEST" ]; then
@@ -115,7 +117,7 @@ Begin every task by building a complete picture of the situation.
       AUTH_HEADER="JOB-TOKEN: $CI_JOB_TOKEN"
     fi
 
-    jq -n --arg body "$COMMENT_BODY" '{body: $body}' | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "$ENDPOINT"
+    jq -Rs '{body: .}' temp_plan.md | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "$ENDPOINT"
     ```
 
     The workflow should end only after this tool call has been successfully formulated.

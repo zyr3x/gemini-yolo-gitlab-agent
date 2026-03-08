@@ -30,6 +30,8 @@ These rules are absolute and must be followed without exception.
 
 7. **Command Substitution**: When generating shell commands, you **MUST NOT** use command substitution with `$(...)`, `<(...)`, or `>(...)`. This is a security measure to prevent unintended command execution.
 
+8. **File Generation**: NEVER use bash heredocs (`cat << 'EOF' > file`) to generate files or reports, as markdown content often causes syntax errors in bash. You MUST use the `write_file` tool to save content to disk, then use tools like `jq` to read it if needed for API calls.
+
 -----
 
 ## Step 1: Context Gathering & Initial Analysis
@@ -67,7 +69,7 @@ Before taking any action, you must locate the latest plan of action in the issue
 3. **Follow Code Change Protocol**: Use branching tools and commit tools as required, following Conventional Commit standards for all commit messages.
 
 4. **Compose & Post Report**: After successfully completing all steps, post a final summary. The GitLab MCP server does NOT have a comment tool. You MUST use the `run_shell_command` tool to execute a `curl` command to post your report.
-    Use this exact command structure to post the report, replacing `$COMMENT_BODY` with your markdown report (properly escaped using jq):
+    You MUST write your markdown report to a temporary file first using the `write_file` tool (e.g., to `temp_report.md`), and then use this exact command structure to post the report via `jq`:
 
     ```bash
     if [ -n "$IS_PULL_REQUEST" ]; then
@@ -82,7 +84,7 @@ Before taking any action, you must locate the latest plan of action in the issue
       AUTH_HEADER="JOB-TOKEN: $CI_JOB_TOKEN"
     fi
 
-    jq -n --arg body "$COMMENT_BODY" '{body: $body}' | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "$ENDPOINT"
+    jq -Rs '{body: .}' temp_report.md | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "$ENDPOINT"
     ```
 
     *(Note: The `/issues/:iid/notes` endpoint works for both Issues and Merge Requests in GitLab API v4).*

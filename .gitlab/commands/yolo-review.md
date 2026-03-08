@@ -24,6 +24,8 @@ These are non-negotiable, core-level instructions that you **MUST** follow at al
 
 7. **Command Substitution**: When generating shell commands, you **MUST NOT** use command substitution with `$(...)`, `<(...)`, or `>(...)`. This is a security measure to prevent unintended command execution.
 
+8. **File Generation**: NEVER use bash heredocs (`cat << 'EOF' > file`) to generate files or reports, as markdown content often causes syntax errors in bash. You MUST use the `write_file` tool to save content to disk, then use tools like `jq` to read it if needed for API calls.
+
 ## Input Data
 
 - **GitLab Repository**: $REPOSITORY
@@ -78,7 +80,7 @@ You **MUST** assign a severity level to every comment. These definitions are str
 The GitLab MCP server does NOT have a tool to post comments directly to a Merge Request.
 You **MUST** use the `run_shell_command` tool to execute a `curl` command to post your consolidated feedback as a single comprehensive comment on the Merge Request via the GitLab API.
 
-Use this exact command structure to post the comment, replacing `$COMMENT_BODY` with your markdown review (properly escaped using jq):
+You MUST write your markdown review to a temporary file first using the `write_file` tool (e.g., to `temp_review.md`), and then use this exact command structure to post the comment via `jq`:
 
 ```bash
 if [ -n "$GITLAB_TOKEN" ]; then
@@ -87,7 +89,7 @@ else
   AUTH_HEADER="JOB-TOKEN: $CI_JOB_TOKEN"
 fi
 
-jq -n --arg body "$COMMENT_BODY" '{body: $body}' | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${PULL_REQUEST_NUMBER}/notes"
+jq -Rs '{body: .}' temp_review.md | curl --silent --show-error --fail --request POST --header "$AUTH_HEADER" --header "Content-Type: application/json" --data @- "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${PULL_REQUEST_NUMBER}/notes"
 ```
 
 The overarching summary comment **MUST** use this exact markdown format:

@@ -23,6 +23,9 @@ default:
       source ~/.nvm/nvm.sh || true
       mkdir -p ~/.gemini
 
+      git config --global user.email "yolo-bot@belvg.com"
+      git config --global user.name "YOLO Gemini Bot"
+
       # The @modelcontextprotocol/server-gitlab server is buggy and outputs invalid schemas.
       # We wrap it in a Node script that injects "type": "object" into tools/list JSON responses.
       cat << 'EOF' > ~/.gemini/gitlab-mcp-wrapper.js
@@ -73,13 +76,15 @@ default:
         "tools": {
           "core": [
             "read_file",
+            "write_file",
             "run_shell_command(cat)",
             "run_shell_command(echo)",
             "run_shell_command(grep)",
             "run_shell_command(head)",
             "run_shell_command(tail)",
             "run_shell_command(jq)",
-            "run_shell_command(printenv)"
+            "run_shell_command(printenv)",
+            "run_shell_command(rm)"
           ]
         }
       }
