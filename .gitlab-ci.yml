@@ -160,7 +160,7 @@ yolo-review:
         export ISSUE_BODY=$(echo "$MR_DATA" | jq -r '.description')
         echo "Found MR !${PULL_REQUEST_NUMBER}: ${ISSUE_TITLE}"
       fi
-    - envsubst < .gitlab/commands/yolo-review.md > yolo_prompt.md
+    - envsubst '$REPOSITORY $PULL_REQUEST_NUMBER $ADDITIONAL_CONTEXT' < .gitlab/commands/yolo-review.md > yolo_prompt.md
     - gemini --yolo --prompt "$(cat yolo_prompt.md)"
 
 # ==========================================
@@ -188,7 +188,7 @@ yolo-triage:
       "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/labels"
       | jq -r '.[].name' | paste -sd "," - > labels.txt
     - export AVAILABLE_LABELS=$(cat labels.txt)
-    - envsubst < .gitlab/commands/yolo-triage.md > yolo_prompt.md
+    - envsubst '$AVAILABLE_LABELS $ISSUE_TITLE $ISSUE_BODY' < .gitlab/commands/yolo-triage.md > yolo_prompt.md
     - gemini --yolo --prompt "$(cat yolo_prompt.md)"
     # Apply labels via API based on SELECTED_LABELS var updated by Gemini
     - source "$CI_PROJECT_DIR/.gemini_env" || true
@@ -232,13 +232,14 @@ yolo-invoke:
     ISSUE_NUMBER: "${CI_MERGE_REQUEST_IID:-$CI_ISSUE_IID}"
     REPOSITORY: "${CI_PROJECT_PATH}"
   script:
-    - envsubst < .gitlab/commands/yolo-invoke.md > yolo_prompt.md
+    - envsubst '$TITLE $DESCRIPTION $EVENT_NAME $IS_PULL_REQUEST $ISSUE_NUMBER $REPOSITORY $ADDITIONAL_CONTEXT' < .gitlab/commands/yolo-invoke.md > yolo_prompt.md
     - |
       set +e
       gemini --yolo --prompt "$(cat yolo_prompt.md)" > gemini_output.log 2>&1
       EXIT_CODE=$?
       set -e
 
+      cat gemini_output.log
       exit $EXIT_CODE
 
 # ==========================================
@@ -261,13 +262,14 @@ yolo-plan-execute:
     ISSUE_NUMBER: "${CI_MERGE_REQUEST_IID:-$CI_ISSUE_IID}"
     REPOSITORY: "${CI_PROJECT_PATH}"
   script:
-    - envsubst < .gitlab/commands/yolo-plan-execute.md > yolo_prompt.md
+    - envsubst '$TITLE $DESCRIPTION $EVENT_NAME $IS_PULL_REQUEST $ISSUE_NUMBER $REPOSITORY $ADDITIONAL_CONTEXT' < .gitlab/commands/yolo-plan-execute.md > yolo_prompt.md
     - |
       set +e
       gemini --yolo --prompt "$(cat yolo_prompt.md)" > gemini_output.log 2>&1
       EXIT_CODE=$?
       set -e
 
+      cat gemini_output.log
       exit $EXIT_CODE
 
 # ==========================================
@@ -291,7 +293,7 @@ yolo-scheduled-triage:
       "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues?state=opened"
       | jq '[.[] | select(.labels | length == 0)]' > issues_to_triage.json
     - export ISSUES_TO_TRIAGE=$(cat issues_to_triage.json)
-    - envsubst < .gitlab/commands/yolo-scheduled-triage.md > yolo_prompt.md
+    - envsubst '$AVAILABLE_LABELS $ISSUES_TO_TRIAGE' < .gitlab/commands/yolo-scheduled-triage.md > yolo_prompt.md
     - gemini --yolo --prompt "$(cat yolo_prompt.md)"
     # Parse TRIAGED_ISSUES json and apply validated labels via API
     - |
