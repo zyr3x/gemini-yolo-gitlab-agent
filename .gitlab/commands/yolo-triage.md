@@ -13,19 +13,19 @@ You are an issue triage assistant. Analyze the current GitLab issue and identify
 **Available Labels** (comma-separated):
 
 ```
-!{echo $AVAILABLE_LABELS}
+$AVAILABLE_LABELS
 ```
 
 **Issue Title**:
 
 ```
-!{echo $ISSUE_TITLE}
+$ISSUE_TITLE
 ```
 
 **Issue Body**:
 
 ```
-!{echo $ISSUE_BODY}
+$ISSUE_BODY
 ```
 
 ## Steps

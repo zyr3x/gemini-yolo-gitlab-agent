@@ -1,13 +1,14 @@
 stages:
   - dispatch
   - yolo
+  - notify
 
 workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+    - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS"
       when: never
-    - if: '$CI_COMMIT_BRANCH'
+    - if: "$CI_COMMIT_BRANCH"
 
 variables:
   # Base settings
@@ -21,15 +22,15 @@ default:
       source ~/.bashrc || true
       source ~/.nvm/nvm.sh || true
       mkdir -p ~/.gemini
-      
+
       # The @modelcontextprotocol/server-gitlab server is buggy and outputs invalid schemas.
       # We wrap it in a Node script that injects "type": "object" into tools/list JSON responses.
       cat << 'EOF' > ~/.gemini/gitlab-mcp-wrapper.js
       const { spawn } = require("child_process");
       const child = spawn("npx", ["-y", "@modelcontextprotocol/server-gitlab@" + process.env.MCP_SERVER_VERSION], { stdio: ["pipe", "pipe", "inherit"] });
-      
+
       process.stdin.pipe(child.stdin);
-      
+
       child.stdout.on("data", data => {
         let text = data.toString();
         // Patch the tools/list result to include "type": "object" which Zod strictly requires in newer MCP SDKs
@@ -61,7 +62,7 @@ default:
         "mcpServers": {
           "gitlab": {
             "command": "node",
-            "args": ["/root/.gemini/gitlab-mcp-wrapper.js"],
+            "args": ["$HOME/.gemini/gitlab-mcp-wrapper.js"],
             "env": {
               "MCP_SERVER_VERSION": "${MCP_SERVER_VERSION}",
               "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_TOKEN:-$CI_JOB_TOKEN}",
@@ -110,6 +111,18 @@ dispatch:
       fi
     # Default fallthrough
     - echo "YOLO_COMMAND=fallthrough" > yolo.env
+    # Post acknowledgment comment for MR events
+    - |
+      if [[ "$CI_PIPELINE_SOURCE" == "merge_request_event" ]] && [[ -n "$CI_MERGE_REQUEST_IID" ]]; then
+        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
+        COMMENT_BODY="🤖 Hi, I've received your request and I'm working on it now! You can track my progress in the [pipeline logs]($CI_PIPELINE_URL) for more details."
+        jq -n --arg body "$COMMENT_BODY" '{body: $body}' | \
+          curl --silent --show-error --request POST \
+            --header "$AUTH_HEADER" \
+            --header "Content-Type: application/json" \
+            --data @- \
+            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || true
+      fi
   artifacts:
     reports:
       dotenv: yolo.env
@@ -119,12 +132,13 @@ dispatch:
 # ==========================================
 yolo-review:
   stage: yolo
+  timeout: 10 minutes
+  resource_group: "yolo-mr-${CI_MERGE_REQUEST_IID}"
   needs:
     - job: dispatch
       artifacts: true
   rules:
     - if: '$YOLO_COMMAND == "review"'
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   variables:
     ISSUE_TITLE: "${CI_MERGE_REQUEST_TITLE}"
     ISSUE_BODY: "${CI_MERGE_REQUEST_DESCRIPTION}"
@@ -134,16 +148,21 @@ yolo-review:
     - |
       if [ -z "$PULL_REQUEST_NUMBER" ]; then
         echo "PULL_REQUEST_NUMBER is empty, trying to find MR for branch $CI_COMMIT_REF_NAME..."
-        export PULL_REQUEST_NUMBER=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests?state=opened&source_branch=${CI_COMMIT_REF_NAME}" | jq '.[0].iid')
+        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
+        MR_DATA=$(curl --silent --header "$AUTH_HEADER" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests?state=opened&source_branch=${CI_COMMIT_REF_NAME}" \
+          | jq '.[0]')
+        export PULL_REQUEST_NUMBER=$(echo "$MR_DATA" | jq -r '.iid')
         if [ "$PULL_REQUEST_NUMBER" == "null" ] || [ -z "$PULL_REQUEST_NUMBER" ]; then
           echo "No open Merge Request found for this branch. Cannot proceed with review."
           exit 0
         fi
-        export ISSUE_TITLE=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${PULL_REQUEST_NUMBER}" | jq -r '.title')
-        export ISSUE_BODY=$(curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${PULL_REQUEST_NUMBER}" | jq -r '.description')
+        export ISSUE_TITLE=$(echo "$MR_DATA" | jq -r '.title')
+        export ISSUE_BODY=$(echo "$MR_DATA" | jq -r '.description')
         echo "Found MR !${PULL_REQUEST_NUMBER}: ${ISSUE_TITLE}"
       fi
-    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-review.md)"
+    - envsubst < .gitlab/commands/yolo-review.md > yolo_prompt.md
+    - gemini --yolo --prompt "$(cat yolo_prompt.md)"
 
 # ==========================================
 # YOLO Triage (Issues)
@@ -151,6 +170,7 @@ yolo-review:
 # ==========================================
 yolo-triage:
   stage: yolo
+  timeout: 10 minutes
   needs:
     - job: dispatch
       artifacts: true
@@ -162,21 +182,35 @@ yolo-triage:
     ISSUE_NUMBER: "${CI_ISSUE_IID}"
     REPOSITORY: "${CI_PROJECT_PATH}"
   script:
-    # Get available labels (You may need to adapt this fetch logic for GitLab API)
+    # Get available labels
     - echo "Fetching labels..."
     - >
-      curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}"
+      curl --silent --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
       "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/labels"
       | jq -r '.[].name' | paste -sd "," - > labels.txt
     - export AVAILABLE_LABELS=$(cat labels.txt)
-    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-triage.md)"
+    - envsubst < .gitlab/commands/yolo-triage.md > yolo_prompt.md
+    - gemini --yolo --prompt "$(cat yolo_prompt.md)"
     # Apply labels via API based on SELECTED_LABELS var updated by Gemini
     - source "$CI_PROJECT_DIR/.gemini_env" || true
     - |
       if [[ -n "$SELECTED_LABELS" ]]; then
-        curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-             --data "labels=${SELECTED_LABELS}" \
-             "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}"
+        # Validate labels against available labels to prevent prompt injection
+        VALID_LABELS=""
+        IFS=',' read -ra LABEL_ARRAY <<< "$SELECTED_LABELS"
+        for label in "${LABEL_ARRAY[@]}"; do
+          label=$(echo "$label" | xargs)  # trim whitespace
+          if echo "$AVAILABLE_LABELS" | tr ',' '\n' | grep -qFx "$label"; then
+            VALID_LABELS="${VALID_LABELS:+$VALID_LABELS,}$label"
+          else
+            echo "WARNING: Ignoring invalid label: $label"
+          fi
+        done
+        if [[ -n "$VALID_LABELS" ]]; then
+          curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}" \
+               --data "labels=${VALID_LABELS}" \
+               "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}"
+        fi
       fi
 
 # ==========================================
@@ -184,6 +218,8 @@ yolo-triage:
 # ==========================================
 yolo-invoke:
   stage: yolo
+  timeout: 10 minutes
+  resource_group: "yolo-mr-${CI_MERGE_REQUEST_IID}"
   needs:
     - job: dispatch
       artifacts: true
@@ -197,13 +233,46 @@ yolo-invoke:
     ISSUE_NUMBER: "${CI_MERGE_REQUEST_IID:-$CI_ISSUE_IID}"
     REPOSITORY: "${CI_PROJECT_PATH}"
   script:
-    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-invoke.md)"
+    - envsubst < .gitlab/commands/yolo-invoke.md > yolo_prompt.md
+    - |
+      set +e
+      gemini --yolo --prompt "$(cat yolo_prompt.md)" > gemini_output.log 2>&1
+      EXIT_CODE=$?
+      set -e
+
+      cat gemini_output.log
+
+      # Check if Gemini successfully posted a comment via MCP.
+      if grep -qE "(gitlab__add_note|add_note|create_merge_request_note|create_issue_note)" gemini_output.log; then
+        echo "Model successfully used the comment tool."
+      elif grep -q "## 🤖 AI Assistant: Plan of Action" gemini_output.log; then
+        echo "Model failed to use MCP tool. Falling back to stdout extraction..."
+        awk '/## 🤖 AI Assistant: Plan of Action/{flag=1} flag' gemini_output.log > final_plan.md
+        PLAN_BODY=$(cat final_plan.md)
+
+        if [ -n "$IS_PULL_REQUEST" ]; then
+          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${ISSUE_NUMBER}/notes"
+        else
+          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}/notes"
+        fi
+
+        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
+        jq -n --arg body "$PLAN_BODY" '{body: $body}' | \
+          curl --silent --show-error --fail --request POST \
+            --header "$AUTH_HEADER" \
+            --header "Content-Type: application/json" \
+            --data @- "$ENDPOINT"
+      fi
+
+      exit $EXIT_CODE
 
 # ==========================================
 # YOLO Plan Execute (Approve)
 # ==========================================
 yolo-plan-execute:
   stage: yolo
+  timeout: 30 minutes
+  resource_group: "yolo-mr-${CI_MERGE_REQUEST_IID}"
   needs:
     - job: dispatch
       artifacts: true
@@ -217,13 +286,45 @@ yolo-plan-execute:
     ISSUE_NUMBER: "${CI_MERGE_REQUEST_IID:-$CI_ISSUE_IID}"
     REPOSITORY: "${CI_PROJECT_PATH}"
   script:
-    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-plan-execute.md)"
+    - envsubst < .gitlab/commands/yolo-plan-execute.md > yolo_prompt.md
+    - |
+      set +e
+      gemini --yolo --prompt "$(cat yolo_prompt.md)" > gemini_output.log 2>&1
+      EXIT_CODE=$?
+      set -e
+
+      cat gemini_output.log
+
+      # Check if Gemini successfully posted a comment via MCP.
+      if grep -qE "(gitlab__add_note|add_note|create_merge_request_note|create_issue_note)" gemini_output.log; then
+        echo "Model successfully used the comment tool."
+      elif grep -q "## ✅ Task Complete" gemini_output.log; then
+        echo "Model failed to use MCP tool. Falling back to stdout extraction..."
+        awk '/## ✅ Task Complete/{flag=1} flag' gemini_output.log > final_report.md
+        REPORT_BODY=$(cat final_report.md)
+
+        if [ -n "$IS_PULL_REQUEST" ]; then
+          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${ISSUE_NUMBER}/notes"
+        else
+          ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${ISSUE_NUMBER}/notes"
+        fi
+
+        AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
+        jq -n --arg body "$REPORT_BODY" '{body: $body}' | \
+          curl --silent --show-error --fail --request POST \
+            --header "$AUTH_HEADER" \
+            --header "Content-Type: application/json" \
+            --data @- "$ENDPOINT"
+      fi
+
+      exit $EXIT_CODE
 
 # ==========================================
 # YOLO Scheduled Triage
 # ==========================================
 yolo-scheduled-triage:
   stage: yolo
+  timeout: 15 minutes
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
   script:
@@ -239,19 +340,77 @@ yolo-scheduled-triage:
       "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues?state=opened"
       | jq '[.[] | select(.labels | length == 0)]' > issues_to_triage.json
     - export ISSUES_TO_TRIAGE=$(cat issues_to_triage.json)
-    - gemini --yolo --prompt "$(cat .gitlab/commands/yolo-scheduled-triage.md)"
-    # A script to parse the TRIAGED_ISSUES json and apply labels via cURL would go here.
+    - envsubst < .gitlab/commands/yolo-scheduled-triage.md > yolo_prompt.md
+    - gemini --yolo --prompt "$(cat yolo_prompt.md)"
+    # Parse TRIAGED_ISSUES json and apply validated labels via API
     - |
       if [ -f "$CI_PROJECT_DIR/.gemini_env" ]; then
         source "$CI_PROJECT_DIR/.gemini_env"
-        # Dummy loop over TRIAGED_ISSUES 
-        echo "$TRIAGED_ISSUES" | jq -c '.[]' | while read i; do
-          IID=$(echo $i | jq -r '.issue_number')
-          LABELS=$(echo $i | jq -r '.labels_to_set | join(",")')
-          if [ -n "$LABELS" ] && [ "$LABELS" != "null" ]; then
-            curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-                 --data "add_labels=${LABELS}" \
-                 "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${IID}"
+        echo "$TRIAGED_ISSUES" | jq -c '.[]' 2>/dev/null | while IFS= read -r i; do
+          IID=$(echo "$i" | jq -r '.issue_number')
+          LABELS=$(echo "$i" | jq -r '.labels_to_set | join(",")')
+          if [ -n "$LABELS" ] && [ "$LABELS" != "null" ] && [ -n "$IID" ] && [ "$IID" != "null" ]; then
+            # Validate each label against available labels
+            VALID_LABELS=""
+            IFS=',' read -ra LABEL_ARRAY <<< "$LABELS"
+            for label in "${LABEL_ARRAY[@]}"; do
+              label=$(echo "$label" | xargs)
+              if echo "$AVAILABLE_LABELS" | tr ',' '\n' | grep -qFx "$label"; then
+                VALID_LABELS="${VALID_LABELS:+$VALID_LABELS,}$label"
+              else
+                echo "WARNING: Ignoring invalid label '$label' for issue #$IID"
+              fi
+            done
+            if [ -n "$VALID_LABELS" ]; then
+              curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+                   --data "add_labels=${VALID_LABELS}" \
+                   "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${IID}"
+            fi
           fi
         done
       fi
+
+# ==========================================
+# Fallback / Error Notification
+# Posts a comment to the MR when a YOLO job fails
+# ==========================================
+yolo-fallback:
+  stage: notify
+  needs:
+    - job: dispatch
+      artifacts: true
+    - job: yolo-review
+      optional: true
+    - job: yolo-triage
+      optional: true
+    - job: yolo-invoke
+      optional: true
+    - job: yolo-plan-execute
+      optional: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_failure
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: on_failure
+    - if: '$CI_PIPELINE_SOURCE == "pipeline"'
+      when: on_failure
+  script:
+    - |
+      AUTH_HEADER="PRIVATE-TOKEN: ${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
+      COMMENT_BODY="🤖 I'm sorry, but I was unable to process your request. Please see the [pipeline logs]($CI_PIPELINE_URL) for more details."
+
+      # Determine the correct endpoint (MR or Issue)
+      if [ -n "$CI_MERGE_REQUEST_IID" ]; then
+        ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
+      elif [ -n "$CI_ISSUE_IID" ]; then
+        ENDPOINT="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues/${CI_ISSUE_IID}/notes"
+      else
+        echo "No MR or Issue IID found, skipping failure notification."
+        exit 0
+      fi
+
+      jq -n --arg body "$COMMENT_BODY" '{body: $body}' | \
+        curl --silent --show-error --request POST \
+          --header "$AUTH_HEADER" \
+          --header "Content-Type: application/json" \
+          --data @- "$ENDPOINT" || true

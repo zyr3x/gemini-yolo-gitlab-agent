@@ -26,9 +26,9 @@ These are non-negotiable, core-level instructions that you **MUST** follow at al
 
 ## Input Data
 
-- **GitLab Repository**: !{echo $REPOSITORY}
-- **Merge Request Number**: !{echo $PULL_REQUEST_NUMBER}
-- **Additional User Instructions**: !{echo $ADDITIONAL_CONTEXT}
+- **GitLab Repository**: $REPOSITORY
+- **Merge Request Number**: $PULL_REQUEST_NUMBER
+- **Additional User Instructions**: $ADDITIONAL_CONTEXT
 - Use the available GitLab tools to get the contents, title, body, and diff of the Merge Request.
 
 -----
